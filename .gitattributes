@@ -1,0 +1,6 @@
+# Normalize line endings so shell scripts always check out LF (WSL/Linux run),
+# batch files CRLF (Windows). Prevents "\r command not found" in WSL.
+* text=auto
+*.sh   text eol=lf
+*.bat  text eol=crlf
+Dockerfile text eol=lf

@@ -1,0 +1,10 @@
+# keep the docker build context lean (context = repo root)
+.git
+build/out
+deploy/*/db
+deploy/*/data
+deploy/*/logs
+deploy/*/certs
+*.exe
+*.db
+*.db-*

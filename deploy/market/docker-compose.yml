@@ -1,0 +1,23 @@
+# market — asset registry server (standalone deploy).
+# Builds inside Docker (multi-stage: golang build stage → distroless runtime),
+# so no host Go toolchain and no prebuilt binary are needed:
+#
+#   cd deploy/market && docker compose up -d --build
+#   curl http://localhost:8820/health
+#
+# market is plain HTTP → bridged port mapping is fine.
+services:
+  market:
+    build:
+      context: ../..                    # repo root = docker build context (go.mod + source)
+      dockerfile: cmd/market/Dockerfile
+      args:
+        VERSION: "0.1.0"
+    image: isann-market:local
+    ports:
+      - "8820:8820"
+    volumes:
+      - ./conf:/app/conf:ro
+      - ./db:/app/db
+      - ./certs:/app/certs
+    restart: unless-stopped

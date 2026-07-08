@@ -1,0 +1,6 @@
+{
+  "addr": ":8820",
+  "tls": { "enabled": false },
+  "db": { "driver": "sqlite", "dsn": "db/market.db" },
+  "replay_window_sec": 300
+}

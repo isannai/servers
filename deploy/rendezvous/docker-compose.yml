@@ -1,0 +1,25 @@
+# rendezvous (rv) — P2P NAT hole-punch coordination (standalone deploy).
+# Builds inside Docker (multi-stage: golang build stage → distroless runtime):
+#
+#   cd deploy/rendezvous && docker compose up -d --build
+#
+# MUST use host networking: hole-punching depends on the RV seeing/advertising
+# each peer's REAL host-visible IP:port (public NAT mapping). Under docker's
+# bridge network the RV would only see the container-internal 172.x address and
+# the bridge/userland-proxy would rewrite UDP source ports — both break the punch
+# (a second NAT layer in front of the NAT you're traversing). No `ports:` in host
+# mode — unified_addr :9100 (TCP+UDP) binds directly on the host.
+services:
+  rendezvous:
+    build:
+      context: ../..
+      dockerfile: cmd/rendezvous/Dockerfile
+      args:
+        VERSION: "0.1.0"
+    image: isann-rendezvous:local
+    network_mode: host
+    volumes:
+      - ./conf:/app/conf:ro
+      - ./logs:/app/logs
+      - ./certs:/app/certs
+    restart: unless-stopped

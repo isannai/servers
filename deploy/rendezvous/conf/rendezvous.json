@@ -1,0 +1,27 @@
+{
+  "tls": {
+    "enabled": true,
+    "cert": "certs/cert.pem",
+    "key": "certs/key.pem"
+  },
+  "unified_addr": ":9100",
+  "rest_addr": ":9000",
+  "advanced": {
+    "proxy_purge_sec": 60,
+    "ping_interval_sec": {
+      "station": 5,
+      "control": 10
+    },
+    "register_interval_sec": {
+      "station": 300,
+      "control": 300
+    },
+    "holepunch": {
+      "pre_punch_count": 5,
+      "pre_punch_interval_ms": 50,
+      "pre_dial_wait_ms": 100,
+      "reply_burst_count": 3,
+      "reply_burst_interval_ms": 50
+    }
+  }
+}
