@@ -1,0 +1,61 @@
+# isann-servers — rendezvous (rv) + market, one compose for review.
+#
+# NO in-container build. The prebuilt Linux binary is MOUNTED into a tiny base
+# image and run directly — so the host needs no Go toolchain and the container
+# needs no build stage. Build the binaries first, then bring the stack up:
+#
+#   ../build/linux/build.sh 0.1.0          # → build/out/linux/{rendezvous,market}
+#   docker compose up -d                    # both  (no --build)
+#   docker compose up -d rendezvous         # rv only
+#   docker compose up -d market             # market only
+#
+# (The binaries are CGO-off static, so debian-slim runs them as-is.)
+#
+# Everything an operator edits or inspects is bind-mounted to the host (NOT
+# read-only, except the binary itself), so config / auth.json / TLS material /
+# db / logs all live on the host and survive container restarts:
+#
+#   rendezvous/conf/rendezvous.json   server config      (edit on host)
+#   rendezvous/conf/auth.json         RV admission mode  (absent = public mode)
+#   rendezvous/certs/                 TLS (self-signed auto-generated on 1st boot)
+#   rendezvous/logs/                  rendezvous.log
+#   market/conf/market.json           server config      (edit on host)
+#   market/certs/                     TLS (when tls.enabled)
+#   market/db/                        market.db (sqlite)
+#   market/logs/                      market.log
+#
+# After editing a conf: `docker compose restart <service>`.
+# After rebuilding a binary: `docker compose restart <service>` (mount is live).
+
+services:
+  rendezvous:
+    image: debian:bookworm-slim
+    command: ["/app/bin/rendezvous", "--config", "/app/conf/rendezvous.json"]
+    working_dir: /app
+    # MUST be host networking: hole-punching needs the RV to see/advertise each
+    # peer's REAL host-visible IP:port. Bridge mode adds a second NAT layer
+    # (container 172.x + userland-proxy UDP source rewrite) that breaks the punch.
+    # No `ports:` in host mode — unified_addr :9100 (TCP+UDP) binds on the host.
+    network_mode: host
+    volumes:
+      - ../build/out/linux/rendezvous:/app/bin/rendezvous:ro   # prebuilt binary (mounted)
+      - ./rendezvous/conf:/app/conf       # rendezvous.json + auth.json (editable)
+      - ./rendezvous/certs:/app/certs     # TLS material (host-exposed)
+      - ./rendezvous/logs:/app/logs
+    restart: unless-stopped
+
+  market:
+    image: debian:bookworm-slim
+    command: ["/app/bin/market", "--config", "/app/conf/market.json"]
+    working_dir: /app
+    # market is a plain JSON API (HTTP, or HTTPS when tls.enabled) → bridged
+    # port mapping is fine (no hole-punching, no host network needed).
+    ports:
+      - "8820:8820"
+    volumes:
+      - ../build/out/linux/market:/app/bin/market:ro           # prebuilt binary (mounted)
+      - ./market/conf:/app/conf           # market.json (editable)
+      - ./market/certs:/app/certs         # TLS material (when tls.enabled)
+      - ./market/db:/app/db               # sqlite db (persisted)
+      - ./market/logs:/app/logs
+    restart: unless-stopped

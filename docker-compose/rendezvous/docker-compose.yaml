@@ -1,0 +1,30 @@
+# rendezvous (rv) — P2P NAT hole-punch coordinator. Self-contained package deploy.
+#
+# This compose lives at docker-compose/rendezvous/ inside the package so the
+# market and rendezvous packages can be unzipped into the SAME folder without
+# their compose files overwriting each other. Volume paths are therefore relative
+# to THIS file (../../ = package root, where bin/ and conf/ live).
+#
+# Run from the extracted package root:
+#   chmod +x bin/rendezvous      # restore the linux exec bit (lost by a zip)
+#   docker compose -f docker-compose/rendezvous/docker-compose.yaml up -d
+#
+# MUST use host networking: hole-punching needs the RV to see/advertise each
+# peer's REAL host-visible IP:port. Bridge mode adds a second NAT layer (container
+# 172.x + userland-proxy UDP source rewrite) that breaks the punch. No `ports:` in
+# host mode — unified_addr :9100 (TCP+UDP) binds directly on the host.
+#
+# TLS is on by default; a self-signed cert is auto-generated into certs/ on first
+# boot when none is present (mount real certs to override).
+services:
+  rendezvous:
+    image: debian:bookworm-slim
+    command: ["/app/bin/rendezvous", "--config", "/app/conf/rendezvous.json"]
+    working_dir: /app
+    network_mode: host
+    volumes:
+      - ../../bin/rendezvous:/app/bin/rendezvous:ro   # prebuilt binary (mounted)
+      - ../../conf:/app/conf                          # rendezvous.json + auth.json (editable)
+      - ../../certs:/app/certs                        # TLS material (self-signed auto-gen)
+      - ../../logs:/app/logs                          # rendezvous.log
+    restart: unless-stopped

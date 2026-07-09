@@ -1,0 +1,28 @@
+# market — asset registry server. Self-contained package deploy.
+#
+# This compose lives at docker-compose/market/ inside the package so the market
+# and rendezvous packages can be unzipped into the SAME folder without their
+# compose files overwriting each other. Volume paths are therefore relative to
+# THIS file (../../ = package root, where bin/ and conf/ live).
+#
+# Run from the extracted package root:
+#   chmod +x bin/market          # restore the linux exec bit (lost by a zip)
+#   docker compose -f docker-compose/market/docker-compose.yaml up -d
+#   curl http://localhost:8820/health
+#
+# The prebuilt binary is MOUNTED into a tiny base image and run directly, so the
+# host needs no Go toolchain. market is plain HTTP -> bridged port mapping is fine.
+services:
+  market:
+    image: debian:bookworm-slim
+    command: ["/app/bin/market", "--config", "/app/conf/market.json"]
+    working_dir: /app
+    ports:
+      - "8820:8820"
+    volumes:
+      - ../../bin/market:/app/bin/market:ro   # prebuilt binary (mounted)
+      - ../../conf:/app/conf                  # market.json (editable)
+      - ../../certs:/app/certs                # TLS material (when tls.enabled)
+      - ../../db:/app/db                      # sqlite db (persisted)
+      - ../../logs:/app/logs                  # market.log
+    restart: unless-stopped

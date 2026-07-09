@@ -1,5 +1,7 @@
 # build output (rebuild with build/<os>/build.*)
 /build/out/
+/build/linux/out/
+/build/windows/out/
 
 # runtime state
 deploy/*/db/
