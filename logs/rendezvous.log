@@ -1,0 +1,28 @@
+2026/07/10 21:51:04 Starting rendezvous server (unified=":9100" rest="" mode="public" issuers=0 proxy_purge=2m0s ping={provider:5s broker:10s} register={provider:5m0s broker:5m0s} holepunch={pre_punch=5x50ms wait=100ms reply_burst=3x50ms})
+2026/07/10 21:51:04 Rendezvous server (unified=":9100", rest="")
+2026/07/10 21:51:04 [rendezvous] UDP punch listening on :9100
+2026/07/10 21:51:04 [rendezvous] TCP control listening on :9100
+2026/07/10 21:51:27 Starting rendezvous server (unified=":19100" rest=":19443" mode="public" issuers=0 proxy_purge=2m0s ping={provider:5s broker:10s} register={provider:5m0s broker:5m0s} holepunch={pre_punch=5x50ms wait=100ms reply_burst=3x50ms})
+2026/07/10 21:51:27 Rendezvous server (unified=":19100", rest=":19443")
+2026/07/10 21:51:27 [rendezvous] REST (HTTP/TCP) on :19443
+2026/07/10 21:51:27 [rendezvous] UDP punch listening on :19100
+2026/07/10 21:51:27 [rendezvous] TCP control listening on :19100
+2026/07/10 21:51:46 Starting rendezvous server (unified=":19100" rest=":19443" mode="public" issuers=0 proxy_purge=2m0s ping={provider:5s broker:10s} register={provider:5m0s broker:5m0s} holepunch={pre_punch=5x50ms wait=100ms reply_burst=3x50ms})
+2026/07/10 21:51:46 Rendezvous server (unified=":19100", rest=":19443")
+2026/07/10 21:51:46 [rendezvous] REST (HTTP/TCP) on :19443
+2026/07/10 21:51:46 [rendezvous] UDP punch listening on :19100
+2026/07/10 21:51:46 [rendezvous] TCP control listening on :19100
+2026/07/10 21:52:11 Starting rendezvous server (unified=":19100" rest=":19443" mode="public" issuers=0 proxy_purge=2m0s ping={provider:5s broker:10s} register={provider:5m0s broker:5m0s} holepunch={pre_punch=5x50ms wait=100ms reply_burst=3x50ms})
+2026/07/10 21:52:11 Rendezvous server (unified=":19100", rest=":19443")
+2026/07/10 21:52:11 [rendezvous] REST (HTTP/TCP) on :19443
+2026/07/10 21:52:11 listen tcp :19100: bind: Only one usage of each socket address (protocol/network address/port) is normally permitted.
+2026/07/10 21:52:13 [rendezvous] UDP punch: unknown prefix 0x09 from 127.0.0.1:51277
+2026/07/10 23:37:38 Starting rendezvous server (unified=":19100" rest=":19443" mode="public" issuers=0 proxy_purge=2m0s ping={provider:5s broker:10s} register={provider:5m0s broker:5m0s} holepunch={pre_punch=5x50ms wait=100ms reply_burst=3x50ms})
+2026/07/10 23:37:38 Rendezvous server (unified=":19100", rest=":19443")
+2026/07/10 23:37:38 [rendezvous] REST (HTTP/TCP) on :19443
+2026/07/10 23:37:38 listen tcp :19100: bind: Only one usage of each socket address (protocol/network address/port) is normally permitted.
+2026/07/10 23:39:14 Starting rendezvous server (unified=":19100" rest=":19443" mode="public" issuers=0 proxy_purge=2m0s ping={provider:5s broker:10s} register={provider:5m0s broker:5m0s} holepunch={pre_punch=5x50ms wait=100ms reply_burst=3x50ms})
+2026/07/10 23:39:14 Rendezvous server (unified=":19100", rest=":19443")
+2026/07/10 23:39:14 [rendezvous] REST (HTTP/TCP) on :19443
+2026/07/10 23:39:14 [rendezvous] UDP punch listening on :19100
+2026/07/10 23:39:14 [rendezvous] TCP control listening on :19100

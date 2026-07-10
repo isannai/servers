@@ -241,8 +241,14 @@ func (s *Server) applyRegister(cc *controlConn, msg *tunnel.RendezvousMsg) {
 	now := time.Now()
 	p := s.proxies[nodeKey(msg.ID)]
 	isNew := p == nil
+	// Capture the pre-update bucket so the O(1) counters can back it out on a
+	// re-register (role swap / AuthMode flip both land here, the only mutation
+	// point for either field).
+	var oldRole, oldAuth string
 	if isNew {
 		p = &ProxyInfo{RegisteredAt: now}
+	} else {
+		oldRole, oldAuth = p.Role, p.AuthMode
 	}
 	p.ID = nodeKey(msg.ID) // store normalized so listings show one consistent form
 	p.Role = msg.Role
@@ -306,6 +312,15 @@ func (s *Server) applyRegister(cc *controlConn, msg *tunnel.RendezvousMsg) {
 		}
 	}
 	s.proxies[nodeKey(msg.ID)] = p
+
+	// Maintain the O(1) discovery counters under the same lock. On re-register
+	// back out the old bucket first (role swap / AuthMode flip), then add the
+	// new one; on a fresh register just add. Duplicate register with no change
+	// nets zero. Decrement happens at the single map-delete point (purge).
+	if !isNew {
+		s.countDelta(oldRole, oldAuth, -1)
+	}
+	s.countDelta(p.Role, p.AuthMode, +1)
 
 	logEntry := map[string]any{
 		"event":       "register-tcp",

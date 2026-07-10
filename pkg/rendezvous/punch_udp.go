@@ -10,8 +10,9 @@ import (
 // unified port's UDP transport. Designed to share buffer-space ideas with
 // the legacy Addr port mux (0x01 / 0x02) so future de-duplication is easy.
 const (
-	punchPrefixPing      byte = 0x01 // isannd → RV: "this is my NAT mapping"
-	punchPrefixHeartbeat byte = 0x02 // legacy heartbeat — ignored here, handled by Addr
+	punchPrefixPing       byte = 0x01 // isannd → RV: "this is my NAT mapping"
+	punchPrefixHeartbeat  byte = 0x02 // legacy heartbeat — ignored here, handled by Addr
+	punchPrefixHealthEcho byte = 0x03 // prober → RV: stateless UDP liveness echo (dual-probe)
 )
 
 // runPunchUDP serves the Phase 3 unified port's UDP transport. Two jobs:
@@ -63,6 +64,16 @@ func (s *Server) runPunchUDP(ctx context.Context, addr string) error {
 			s.learnPublicAddr(nodeID, src)
 		case punchPrefixHeartbeat:
 			// Legacy — ignored on this listener
+		case punchPrefixHealthEcho:
+			// Stateless liveness echo (dual-probe with TCP /health): reply the
+			// ping verbatim so a prober confirms UDP :9100 is actually open.
+			// Amplification-safe — the pong is exactly the ping (never larger,
+			// carries the caller's nonce back) and per-source-IP rate-limited.
+			// No registry access; nothing is created or mutated.
+			if host := clientIP(src.String()); host == "" || !s.healthLimiter.allow(host) {
+				continue
+			}
+			_, _ = pc.WriteTo(buf[:n], src)
 		default:
 			log.Printf("[rendezvous] UDP punch: unknown prefix 0x%02x from %s", buf[0], src)
 		}

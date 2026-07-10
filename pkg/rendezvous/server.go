@@ -133,6 +133,24 @@ type Server struct {
 	proxies map[string]*ProxyInfo
 	mu      sync.RWMutex
 
+	// startedAt — process start time, for /health uptime_s.
+	startedAt time.Time
+
+	// Discovery role counters — O(1) counts maintained at proxy insert/delete
+	// (never a roster scan), guarded by s.mu (same lock as proxies). Buckets use
+	// the new discovery names (station/control/passenger); public = station
+	// nodes advertising AuthMode=="public" (a station overlay, not a separate
+	// role). Read by /health.counts.
+	cntStation   int
+	cntControl   int
+	cntPassenger int
+	cntPublic    int
+
+	// healthLimiter — per-source-IP rate limiter shared by the public,
+	// unauthenticated /health (TCP) and the 0x03 UDP health-echo. Protects
+	// weak self-hosted RV boxes from a flood without touching legit probers.
+	healthLimiter *healthRateLimiter
+
 	// Phase 1 refine: session cache + per-service metric cache (populated
 	// by UDP 0x02 HeartbeatMsg handler, read by /v1/nodes).
 	sessions *tunnel.SessionCache
@@ -318,11 +336,45 @@ func (s *Server) computeConnStatus(role string, lastSeen, now time.Time) string 
 
 func NewServer(addr string) *Server {
 	return &Server{
-		Addr:     addr,
-		proxies:  make(map[string]*ProxyInfo),
-		sessions: tunnel.NewSessionCache(),
-		metrics:  make(map[string]*NodeMetric),
-		heartSeq: make(map[string]uint64),
+		Addr:          addr,
+		proxies:       make(map[string]*ProxyInfo),
+		sessions:      tunnel.NewSessionCache(),
+		metrics:       make(map[string]*NodeMetric),
+		heartSeq:      make(map[string]uint64),
+		healthLimiter: newHealthRateLimiter(defaultHealthRateLimit),
+	}
+}
+
+// roleBucket maps an internal RV role (legacy provider/broker/consumer or the
+// new station/control/passenger names) to its discovery bucket, or "" when the
+// role is unknown.
+func roleBucket(role string) string {
+	switch strings.ToLower(role) {
+	case "provider", "station":
+		return "station"
+	case "broker", "control":
+		return "control"
+	case "consumer", "passenger":
+		return "passenger"
+	}
+	return ""
+}
+
+// countDelta adjusts the O(1) discovery counters for one proxy by delta (+1 on
+// add, -1 on remove). Caller MUST hold s.mu. public is a station overlay: a
+// station node advertising AuthMode=="public" (free-tier serving) counts in
+// BOTH station and public.
+func (s *Server) countDelta(role, authMode string, delta int) {
+	switch roleBucket(role) {
+	case "station":
+		s.cntStation += delta
+		if strings.EqualFold(authMode, "public") {
+			s.cntPublic += delta
+		}
+	case "control":
+		s.cntControl += delta
+	case "passenger":
+		s.cntPassenger += delta
 	}
 }
 
@@ -330,17 +382,11 @@ func (s *Server) Run() error {
 	if s.UnifiedAddr == "" {
 		return fmt.Errorf("rendezvous: unified_addr must be set — legacy UDP+HTTP/3 listener was removed")
 	}
+	s.startedAt = time.Now()
 
 	// HTTP API handler (shared by REST listener).
 	httpMux := http.NewServeMux()
-	httpMux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
-			"status":  "ok",
-			"version": setup.RendezvousVersion,
-			"hash":    setup.SelfHash(),
-		})
-	})
+	httpMux.HandleFunc("/health", s.handleHealth)
 	// /v1/metrics — heartbeat-aggregated per-(node, service) metric rows.
 	httpMux.HandleFunc("/v1/metrics", s.handleMetrics)
 	httpMux.HandleFunc("/v1/nodes", s.handleNodes)
@@ -357,6 +403,10 @@ func (s *Server) Run() error {
 			now := time.Now()
 			for id, p := range s.proxies {
 				if now.Sub(p.LastSeen) > cutoff {
+					// Decrement the discovery counters here — the single map-delete
+					// point covers clean disconnect, heartbeat timeout, and crash
+					// (all funnel through purge), so counts never leak. Same lock.
+					s.countDelta(p.Role, p.AuthMode, -1)
 					log.Printf("[rendezvous] cleanup: removed stale proxy %s (last seen %s ago, cutoff=%s)", id, now.Sub(p.LastSeen).Round(time.Second), cutoff)
 					delete(s.proxies, id)
 				}
@@ -432,13 +482,15 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	// node_id is an exact lookup — when present, every other filter is
 	// ignored. Comma-separated to request multiple specific nodes at once.
+	// Keys are nodeKey-normalized so they index s.proxies directly (O(k))
+	// and match case-insensitively.
 	var nodeIDSet map[string]bool
 	if raw := q.Get("node_id"); raw != "" {
 		nodeIDSet = make(map[string]bool)
 		for _, id := range strings.Split(raw, ",") {
 			id = strings.TrimSpace(id)
 			if id != "" {
-				nodeIDSet[id] = true
+				nodeIDSet[nodeKey(id)] = true
 			}
 		}
 	}
@@ -510,42 +562,102 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now()
+
+	// emit builds a directory node from a proxy entry. Extracted so the
+	// node_id fast-path and the general scan share one build path (services
+	// strip + static fields + started_at + connected_at) and never drift.
+	emit := func(p *ProxyInfo) node {
+		// /v1/nodes is static-only now. Per-service volatile (queue_depth,
+		// total_jobs_done, avg_job_sec, status) is served by /v1/metrics.
+		// We emit Services as-is (engine/model/version/ready) and strip any
+		// stale volatile fields that an old provider may still include.
+		staticSvcs := make([]setup.ServiceInfo, len(p.Services))
+		for i, svc := range p.Services {
+			staticSvcs[i] = setup.ServiceInfo{
+				Name:           svc.Name,
+				Type:           svc.Type,
+				Launcher:       svc.Launcher,
+				Version:        svc.Version,
+				BinHash:        svc.BinHash,
+				Model:          svc.Model,
+				ModelHash:      svc.ModelHash,
+				ModelOriginURL: svc.ModelOriginURL,
+				ServerReady:    svc.ServerReady,
+				ServerLoading: svc.ServerLoading,
+				ChildPID:      svc.ChildPID,
+				ChildName:     svc.ChildName,
+				MaxQueue:      svc.MaxQueue,
+				Concurrency:   svc.Concurrency,
+				QueueDisabled: svc.QueueDisabled,
+				Inspect:       svc.Inspect,
+				InspectLabels: svc.InspectLabels,
+				InspectOrder:  svc.InspectOrder,
+			}
+		}
+		n := node{
+			ID:           p.ID,
+			Role:         p.Role,
+			Addr:         p.Addr,
+			Version:      p.Version,
+			BinHash:      p.BinHash,
+			OwnerAddress: p.OwnerAddress,
+			Emblem:       p.Emblem,
+			AuthMode:     p.AuthMode,
+			Hardware:     setup.StableHardware(p.Hardware),
+			Services:     staticSvcs,
+			TPMVerified:  p.TPMVerified,
+			EKCertIssuer: p.EKCertIssuer,
+		}
+		if !p.RegisteredAt.IsZero() {
+			n.StartedAt = p.RegisteredAt.UTC().Format(time.RFC3339)
+		}
+		// connected_at — when the node's CURRENT TCP control conn was
+		// established (resets on reconnect, unlike started_at which survives
+		// brief drops within the purge window). A stable timestamp, not a live
+		// duration, so /v1/nodes stays ETag-stable; the client computes elapsed
+		// time. From the live controlConns registry (p.ID is nodeKey-normalized,
+		// matching the controlConns key set in handleControlConn).
+		if ccVal, ok := s.controlConns.Load(p.ID); ok {
+			if cc, ok := ccVal.(*controlConn); ok && !cc.connectedAt.IsZero() {
+				n.ConnectedAt = cc.connectedAt.UTC().Format(time.RFC3339)
+			}
+		}
+		return n
+	}
+
+	// isPassenger — passenger nodes (role=passenger, "P:" id; legacy
+	// "consumer"/"C:") register with RV ONLY so hole-punch can reach them.
+	// They serve nothing and are never a dial target, so they must never
+	// surface in the node directory / discovery — skipped in both paths.
+	isPassenger := func(role string) bool {
+		return strings.EqualFold(role, "consumer") || strings.EqualFold(role, "passenger")
+	}
+
 	s.mu.RLock()
 	var all []node
-	var cntProvider, cntBroker, cntConsumer int
-	for _, p := range s.proxies {
-		online := now.Sub(p.LastSeen) < 90*time.Second
 
-		// Role tally over (online-filtered) registrations — counts ALL roles
-		// including consumers, which are then skipped from the directory list
-		// below. This is the ONLY way the Gate can aggregate consumer counts:
-		// they never appear in the node list. Independent of display filters.
-		if !onlineOnly || online {
-			switch strings.ToLower(p.Role) {
-			case "provider", "station":
-				cntProvider++
-			case "broker", "control":
-				cntBroker++
-			case "consumer", "passenger":
-				cntConsumer++
-			}
-		}
-
-		// Passenger nodes (role=passenger, "P:" id; legacy "consumer"/"C:")
-		// register with RV ONLY so hole-punch can reach them (RV learns their
-		// UDP mapping for the return-punch). They serve nothing and are never a
-		// dial target, so they must never surface in the node directory /
-		// discovery — skip unconditionally, even for an explicit node_id lookup.
-		if strings.EqualFold(p.Role, "consumer") || strings.EqualFold(p.Role, "passenger") {
-			continue
-		}
-
-		// node_id lookup — bypass every other filter.
-		if nodeIDSet != nil {
-			if !nodeIDSet[p.ID] {
+	if nodeIDSet != nil {
+		// Targeted lookup — index the map directly (O(k)), one entry per
+		// requested id, instead of scanning every proxy. nodeIDSet keys are
+		// nodeKey-normalized, so they index s.proxies directly.
+		for id := range nodeIDSet {
+			p, ok := s.proxies[id]
+			if !ok || isPassenger(p.Role) {
 				continue
 			}
-		} else {
+			all = append(all, emit(p))
+		}
+	} else {
+		for _, p := range s.proxies {
+			online := now.Sub(p.LastSeen) < 90*time.Second
+
+			// Passengers never surface in the directory (hidden role). This
+			// endpoint no longer aggregates roles — counts (incl. passengers)
+			// are served O(1) by /health.counts, and X-Role-Counts is gone (M4).
+			if isPassenger(p.Role) {
+				continue
+			}
+
 			if onlineOnly && !online {
 				continue
 			}
@@ -581,66 +693,9 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 			if minVRAM > 0 && maxGPUVRAM(p.Hardware) < minVRAM {
 				continue
 			}
-		}
 
-		// /v1/nodes is static-only now. Per-service volatile (queue_depth,
-		// total_jobs_done, avg_job_sec, status) is served by /v1/metrics.
-		// We emit Services as-is (engine/model/version/ready) and strip any
-		// stale volatile fields that an old provider may still include.
-		staticSvcs := make([]setup.ServiceInfo, len(p.Services))
-		for i, svc := range p.Services {
-			staticSvcs[i] = setup.ServiceInfo{
-				Name:           svc.Name,
-				Type:           svc.Type,
-				Launcher:       svc.Launcher,
-				Version:        svc.Version,
-				BinHash:        svc.BinHash,
-				Model:          svc.Model,
-				ModelHash:      svc.ModelHash,
-				ModelOriginURL: svc.ModelOriginURL,
-				ServerReady:    svc.ServerReady,
-				ServerLoading: svc.ServerLoading,
-				ChildPID:      svc.ChildPID,
-				ChildName:     svc.ChildName,
-				MaxQueue:      svc.MaxQueue,
-				Concurrency:   svc.Concurrency,
-				QueueDisabled: svc.QueueDisabled,
-				Inspect:       svc.Inspect,
-				InspectLabels: svc.InspectLabels,
-				InspectOrder:  svc.InspectOrder,
-			}
+			all = append(all, emit(p))
 		}
-
-		n := node{
-			ID:           p.ID,
-			Role:         p.Role,
-			Addr:         p.Addr,
-			Version:      p.Version,
-			BinHash:      p.BinHash,
-			OwnerAddress: p.OwnerAddress,
-			Emblem:       p.Emblem,
-			AuthMode:     p.AuthMode,
-			Hardware:     setup.StableHardware(p.Hardware),
-			Services:     staticSvcs,
-			TPMVerified:  p.TPMVerified,
-			EKCertIssuer: p.EKCertIssuer,
-		}
-		if !p.RegisteredAt.IsZero() {
-			n.StartedAt = p.RegisteredAt.UTC().Format(time.RFC3339)
-		}
-		// connected_at — when the node's CURRENT TCP control conn was
-		// established (resets on reconnect, unlike started_at which survives
-		// brief drops within the purge window). A stable timestamp, not a live
-		// duration, so /v1/nodes stays ETag-stable; the client computes elapsed
-		// time. From the live controlConns registry (p.ID is nodeKey-normalized,
-		// matching the controlConns key set in handleControlConn).
-		if ccVal, ok := s.controlConns.Load(p.ID); ok {
-			if cc, ok := ccVal.(*controlConn); ok && !cc.connectedAt.IsZero() {
-				n.ConnectedAt = cc.connectedAt.UTC().Format(time.RFC3339)
-			}
-		}
-		all = append(all, n)
-		_ = online // sorting moved to client (live data lives in /v1/metrics)
 	}
 	s.mu.RUnlock()
 
@@ -690,16 +745,12 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 		etagNodes[i] = etagNode{ID: n.ID, Role: n.Role, Addr: n.Addr, AuthMode: n.AuthMode, Hardware: n.Hardware, Services: n.Services}
 	}
 	etagBody, _ := json.Marshal(etagNodes)
-	// Fold the consumer count into the ETag: consumers are excluded from the
-	// node list (and thus etagNodes), but their join/leave IS a real change a
-	// caching client (the Gate) must see, so it has to invalidate. Provider /
-	// broker changes already move etagNodes.
-	etagBody = append(etagBody, []byte(fmt.Sprintf("|c=%d", cntConsumer))...)
+	// ETag over the directory (station/control) nodes only. Passengers are
+	// hidden from the list, so their churn doesn't change the body — no consumer
+	// fold needed. Role aggregation + the X-Role-Counts header were removed in
+	// M4; per-role counts now live solely on /health.counts.
 	h := sha256.Sum256(etagBody)
 	etag := `"` + hex.EncodeToString(h[:8]) + `"`
-	// Per-role counts (incl. consumers, which the list hides) for the Gate to
-	// aggregate. Set before the 304 check so it rides every response.
-	w.Header().Set("X-Role-Counts", fmt.Sprintf("provider=%d,broker=%d,consumer=%d", cntProvider, cntBroker, cntConsumer))
 	w.Header().Set("Cache-Control", "private, max-age=0, must-revalidate")
 	w.Header().Set("ETag", etag)
 	if match := r.Header.Get("If-None-Match"); match == etag {
@@ -737,14 +788,16 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
 	// node_id lookup — when present, all other filters are ignored.
-	// Comma-separated to request multiple nodes at once.
+	// Comma-separated to request multiple nodes at once. Keys are
+	// nodeKey-normalized to match the proxy/metric key form (case-safe) and
+	// to snapshot only the requested nodes below.
 	var nodeIDSet map[string]bool
 	if raw := q.Get("node_id"); raw != "" {
 		nodeIDSet = make(map[string]bool)
 		for _, id := range strings.Split(raw, ",") {
 			id = strings.TrimSpace(id)
 			if id != "" {
-				nodeIDSet[id] = true
+				nodeIDSet[nodeKey(id)] = true
 			}
 		}
 	}
@@ -820,8 +873,19 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	live := make(map[string]liveness)
 	s.mu.RLock()
-	for id, p := range s.proxies {
-		live[id] = liveness{lastSeen: p.LastSeen, role: p.Role}
+	if nodeIDSet != nil {
+		// Targeted — snapshot only the requested nodes (O(k)) instead of every
+		// proxy. Keys are nodeKey-normalized (== proxy map key == metric NodeID),
+		// so the metric-row filter and live lookup below still match.
+		for id := range nodeIDSet {
+			if p, ok := s.proxies[id]; ok {
+				live[id] = liveness{lastSeen: p.LastSeen, role: p.Role}
+			}
+		}
+	} else {
+		for id, p := range s.proxies {
+			live[id] = liveness{lastSeen: p.LastSeen, role: p.Role}
+		}
 	}
 	s.mu.RUnlock()
 
@@ -894,6 +958,102 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(out)
 }
 
+
+// handleHealth serves the public, unauthenticated liveness + discovery-counts
+// probe (§2 rv-discovery-api). O(1): counts come from the maintained role
+// counters, never a roster scan. Response embeds version/uptime and the
+// station/control/passenger/public/total counts so a prober (indexer) gets
+// "alive + how big" in a single round-trip.
+//
+// M2: ETag fingerprints the counts (not uptime) so a quiet RV answers 304 to a
+// conditional prober; a per-source-IP rate limiter shields weak boxes.
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if ip := clientIP(r.RemoteAddr); ip != "" && !s.healthLimiter.allow(ip) {
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusTooManyRequests)
+		return
+	}
+
+	s.mu.RLock()
+	station, control, passenger, public := s.cntStation, s.cntControl, s.cntPassenger, s.cntPublic
+	s.mu.RUnlock()
+
+	w.Header().Set("Content-Type", "application/json")
+
+	// ETag over the counts only — uptime ticks every second and would defeat
+	// 304s, but discovery only cares about liveness + size, which the counts
+	// capture. A prober that gets 304 keeps the last body (uptime is coarse).
+	etag := fmt.Sprintf(`"c-%d-%d-%d-%d"`, station, control, passenger, public)
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Cache-Control", "no-cache")
+	if match := r.Header.Get("If-None-Match"); match == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
+	uptime := int64(0)
+	if !s.startedAt.IsZero() {
+		uptime = int64(time.Since(s.startedAt).Seconds())
+	}
+	// total = roster-visible nodes = station + control. passenger is a hidden
+	// role (never in the directory); public is a station overlay, so neither is
+	// added into total.
+	json.NewEncoder(w).Encode(map[string]any{
+		"status":   "ok",
+		"version":  setup.RendezvousVersion,
+		"hash":     setup.SelfHash(),
+		"role":     "rendezvous",
+		"uptime_s": uptime,
+		"counts": map[string]int{
+			"station":   station,
+			"control":   control,
+			"passenger": passenger,
+			"public":    public,
+			"total":     station + control,
+		},
+	})
+}
+
+// clientIP extracts the host from a "host:port" RemoteAddr (no X-Forwarded-For:
+// it is trivially spoofable, and the limiter guards the direct socket peer).
+func clientIP(remoteAddr string) string {
+	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		return host
+	}
+	return remoteAddr
+}
+
+// defaultHealthRateLimit — max /health (+ UDP echo) requests per source IP per
+// second. Generous for legit probers (the indexer polls once/60s) while capping
+// a flood against a weak self-hosted box.
+const defaultHealthRateLimit = 20
+
+// healthRateLimiter is a cheap fixed-window (1s) per-source-IP limiter. Memory
+// is bounded to one window's distinct IPs — the map is dropped and rebuilt each
+// second, so there is no unbounded growth and no separate cleanup goroutine.
+type healthRateLimiter struct {
+	mu     sync.Mutex
+	limit  int
+	window time.Time
+	hits   map[string]int
+}
+
+func newHealthRateLimiter(perSec int) *healthRateLimiter {
+	return &healthRateLimiter{limit: perSec, hits: make(map[string]int)}
+}
+
+// allow reports whether ip may proceed in the current one-second window.
+func (h *healthRateLimiter) allow(ip string) bool {
+	now := time.Now().Truncate(time.Second)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if now.After(h.window) {
+		h.window = now
+		h.hits = make(map[string]int)
+	}
+	h.hits[ip]++
+	return h.hits[ip] <= h.limit
+}
 
 // hasGPUName reports whether any GPU's name contains needle (case-insensitive).
 func hasGPUName(hw *setup.HardwareSpec, needle string) bool {
