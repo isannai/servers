@@ -269,6 +269,14 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request, typ, author,
 		writeJSON(w, 400, errBody("bad_request", "recipe author does not match signer"))
 		return
 	}
+	// app-type: re-validate the multi-OS platform declaration (don't trust the
+	// client / a replayed signed recipe) — app-json-platforms.md M6.
+	if typ == "app" {
+		if err := ValidateAppRecipe(req.Recipe); err != nil {
+			writeJSON(w, 400, errBody("bad_request", err.Error()))
+			return
+		}
+	}
 	sum := sha256.Sum256([]byte(req.Recipe))
 	in := PushInput{
 		Type: typ, Author: author, Meta: meta,

@@ -3,10 +3,8 @@ package market
 // models.go — market data model (API §10.2 / db-schema.md).
 //
 // An asset is keyed by the composite (type, author, name); versions hang off
-// it 1:N. In the v1 CENTRAL model the recipe body (install.ian, KB) is stored
-// inline per version — the DB is the payload store, not just an indexer. The
-// db-schema.md CID/chain_tx columns are the Phase-3 DApp (IPFS + chain) shape
-// and are left nullable/empty here.
+// it 1:N. The recipe body (install.ian, KB) is stored inline per version in
+// asset_versions.recipe_body — the central DB is the payload store + indexer.
 
 import "time"
 

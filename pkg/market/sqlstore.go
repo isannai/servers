@@ -6,10 +6,9 @@ package market
 // tiny dialect shim, since the query set is identical and only DDL + now()
 // differ.
 //
-// v1 CENTRAL model: the recipe body lives inline in asset_versions.recipe_body.
-// The db-schema.md CID/chain_tx (IPFS + chain) columns are Phase-3 and omitted.
+// The recipe body lives inline in asset_versions.recipe_body (central DB).
 // Tags are stored comma-joined on assets.tags (schema.md sanctions this over a
-// separate asset_tags table for v1) and searched with LIKE.
+// separate asset_tags table) and searched with LIKE.
 
 import (
 	"context"
@@ -79,7 +78,6 @@ func (s *sqlStore) migrate() error {
 				id           BIGINT AUTO_INCREMENT PRIMARY KEY,
 				eoa          CHAR(42) NOT NULL UNIQUE,
 				handle       VARCHAR(39) UNIQUE,
-				agent_id     VARCHAR(80) UNIQUE,
 				display_name VARCHAR(100) DEFAULT '',
 				created_at   DATETIME NOT NULL
 			)`,
@@ -121,7 +119,6 @@ func (s *sqlStore) migrate() error {
 				id           INTEGER PRIMARY KEY AUTOINCREMENT,
 				eoa          TEXT NOT NULL UNIQUE,
 				handle       TEXT UNIQUE,
-				agent_id     TEXT UNIQUE,
 				display_name TEXT DEFAULT '',
 				created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 			)`,
