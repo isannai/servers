@@ -9,11 +9,11 @@ REM  CGO_ENABLED=0 -> static ELF). Mirror of build\windows\build.bat. Two
 REM  self-contained artifacts under build\linux\out\, market and rendezvous
 REM  packaged SEPARATELY:
 REM
-REM    1) market-linux-amd64.zip
+REM    1) market-linux-amd64.tar.gz
 REM         bin\market            the executable (linux/amd64 ELF)
 REM         conf\market.json      the config
 REM         docker-compose.yaml   the deploy compose
-REM    2) rendezvous-linux-amd64.zip
+REM    2) rendezvous-linux-amd64.tar.gz
 REM         bin\rendezvous        the executable (linux/amd64 ELF)
 REM         conf\rendezvous.json  the config
 REM         conf\auth.json        RV admission mode (absent = public mode)
@@ -22,8 +22,9 @@ REM
 REM  (market has NO auth.json by design: write access is per-asset signer, not
 REM   an operator allow-list -- see pkg/market/config.go.)
 REM
-REM  Runs on Windows, produces Linux binaries. The Linux exec bit is NOT carried
-REM  by the .zip -- `chmod +x bin/<svc>` after extracting on the target.
+REM  Runs on Windows, produces Linux binaries. Packaged as .tar.gz (not .zip):
+REM  tar is on every Linux box (no unzip needed) and `ivm rv|market install`
+REM  (setup.ExtractTarGz) restores the exec bit on bin\<svc> -- no manual chmod.
 REM
 REM  Version is injected via ldflags (-X) into pkg/setup.*Version. REQUIRED.
 REM
@@ -71,7 +72,7 @@ if errorlevel 1 goto :error
 mkdir "%MKT%\docker-compose\market"
 copy /Y "docker-compose\market\docker-compose.yaml" "%MKT%\docker-compose\market\" >nul
 if errorlevel 1 goto :error
-powershell -NoProfile -Command "Compress-Archive -Path '%MKT%\*' -DestinationPath '%OUT%\market-%ARCH%.zip' -Force"
+tar -czf "%OUT%\market-%ARCH%.tar.gz" -C "%MKT%" .
 if errorlevel 1 goto :error
 
 REM --- rendezvous -----------------------------------------------------------
@@ -86,14 +87,14 @@ if errorlevel 1 goto :error
 mkdir "%RV%\docker-compose\rendezvous"
 copy /Y "docker-compose\rendezvous\docker-compose.yaml" "%RV%\docker-compose\rendezvous\" >nul
 if errorlevel 1 goto :error
-powershell -NoProfile -Command "Compress-Archive -Path '%RV%\*' -DestinationPath '%OUT%\rendezvous-%ARCH%.zip' -Force"
+tar -czf "%OUT%\rendezvous-%ARCH%.tar.gz" -C "%RV%" .
 if errorlevel 1 goto :error
 
 echo.
 echo ===========================================================================
 echo  build complete   v%VER%
-echo    %OUT%\market-%ARCH%.zip       (+ folder %OUT%\market\)
-echo    %OUT%\rendezvous-%ARCH%.zip   (+ folder %OUT%\rendezvous\)
+echo    %OUT%\market-%ARCH%.tar.gz       (+ folder %OUT%\market\)
+echo    %OUT%\rendezvous-%ARCH%.tar.gz   (+ folder %OUT%\rendezvous\)
 echo ===========================================================================
 goto :end
 
